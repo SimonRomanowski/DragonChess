@@ -9,8 +9,12 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.logging.ConsoleHandler;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+
+import static java.util.logging.Level.FINE;
+import static java.util.logging.Level.SEVERE;
 
 /**
  * This class represents a game of Dragonchess.<br>
@@ -64,10 +68,10 @@ public class DragonChessGame {
      */
     private Map<UUID, Set<MovementOption>> scarletOptionsCache = null;
 
-    public DragonChessGame(final Logger logger,
-                           final String goldPlayerName,
-                           final String scarletPlayerName,
-                           final DragonChessBoard board) {
+    private DragonChessGame(final Logger logger,
+                            final String goldPlayerName,
+                            final String scarletPlayerName,
+                            final DragonChessBoard board) {
         this.logger = logger;
         this.goldPlayerName = goldPlayerName;
         this.scarletPlayerName = scarletPlayerName;
@@ -75,7 +79,7 @@ public class DragonChessGame {
 
         updateOptionsCache();
 
-        this.logger.log(Level.FINE, "Created game");
+        this.logger.log(FINE, "Created game");
     }
 
     /**
@@ -88,7 +92,8 @@ public class DragonChessGame {
     private void updateOptionsCache() {
         OptionCalculator calculator = OptionCalculator.create(
                 board.getState(),
-                List.copyOf(turnHistory));
+                List.copyOf(turnHistory),
+                logger);
 
         goldOptionsCache = calculator.getGoldOptions();
         scarletOptionsCache = calculator.getScarletOptions();
@@ -107,7 +112,9 @@ public class DragonChessGame {
             throw new IllegalArgumentException("Player name can not be null");
         }
         Logger logger = Logger.getLogger("DragonChess|" + goldPlayerName + "|" + scarletPlayerName);
-        DragonChessBoard board = DragonChessBoard.create();
+        logger.addHandler(new ConsoleHandler());
+
+        DragonChessBoard board = DragonChessBoard.create(logger);
 
         return new DragonChessGame(logger, goldPlayerName, scarletPlayerName, board);
     }
@@ -118,7 +125,7 @@ public class DragonChessGame {
      * @return The information needed to display the current state of the board
      */
     public DragonChessBoardState getBoardState() {
-        logger.log(Level.FINE, "Board state request received");
+        logger.log(FINE, "Board state request received");
         return board.getState();
     }
 
@@ -134,7 +141,7 @@ public class DragonChessGame {
      */
     public boolean belongsToPlayer(final Player player, final UUID pieceId)
             throws IllegalIdException {
-        logger.log(Level.FINE, "Piece belonging request received.\n"
+        logger.log(FINE, "Piece belonging request received.\n"
                 + "player : " + player + '\n'
                 + "pieceId: " + pieceId);
         if (player == null) {
@@ -154,7 +161,7 @@ public class DragonChessGame {
      * @throws IllegalIdException If the given UUID is invalid
      */
     public Set<MovementOption> getOptions(final UUID pieceId) throws IllegalIdException {
-        logger.log(Level.FINE, "Retrieving options for piece with id " + pieceId);
+        logger.log(FINE, "Retrieving options for piece with id " + pieceId);
         // The options-caches can be expected to be up-to-date
         Map<UUID, Set<MovementOption>> options;
         if (belongsToPlayer(Player.GOLD, pieceId)) {
@@ -163,9 +170,9 @@ public class DragonChessGame {
             options = scarletOptionsCache;
         } else {
             // At this point, belongsToPlayer should already have thrown an exception
-            logger.log(Level.SEVERE, "belongsToPlayer did throw the proper exception");
+            logger.log(SEVERE, "belongsToPlayer did throw the proper exception");
             String errorMessage = "Could not find piece with id " + pieceId;
-            logger.log(Level.SEVERE, errorMessage);
+            logger.log(SEVERE, errorMessage);
             throw new IllegalIdException(errorMessage);
         }
 
@@ -175,7 +182,8 @@ public class DragonChessGame {
     }
 
     /**
-     * Attempts to move the piece with the given UUID to the given location.<br>
+     * Attempts to move the piece with the given UUID to the given location or to capture from
+     * afar if possible.<br>
      * The return value gives information on whether the turn was taken successfully and if so
      * what happened.<br>
      * Note that if the turn is executed, the other player's turn starts
@@ -187,7 +195,7 @@ public class DragonChessGame {
      */
     public List<TurnEvent> movePiece(final UUID pieceId, final BoardPosition position)
             throws IllegalIdException {
-        logger.log(Level.FINE, "Attempting to move piece with id " + pieceId
+        logger.log(FINE, "Attempting to move piece with id " + pieceId
             + " to position " + position);
         TurnEvent event = determineTurnEvent(pieceId, position);
 
@@ -255,29 +263,39 @@ public class DragonChessGame {
      * @param event The event that should be processed
      */
     private void updateBoard(final TurnEvent event) {
+        logger.log(FINE, "Updating board");
         UUID pieceId = event.getPieceId();
-        switch (event.getType()) {
+        try {
+            switch (event.getType()) {
 
-            case PIECE_MOVED -> {
-                BoardPosition position = event.getPosition();
-                board.movePiece(pieceId, position);
+                case PIECE_MOVED, PIECE_CAPTURED -> {
+                    // In the case that a piece is captured, we just override that piece
+                    BoardPosition position = event.getPosition();
+                    board.movePiece(pieceId, position);
+                }
+
+                case PIECE_CAPTURED_AFAR -> board.removePiece(event.getCapturedPieceId());
+
+                case PIECE_PROMOTED -> {
+                    BoardPosition position = event.getPosition();
+                    board.movePiece(pieceId, position);
+                    board.promotePiece(pieceId);
+                }
+
+                case INVALID_LOCATION, INVALID_PLAYER -> {
+                    // Do nothing
+                }
+
+                case WIN_GOLD, WIN_SCARLET, TIE -> {
+                    // This case should never occur
+                    String errorMessage = "Game result has been determined prematurely";
+                    logger.log(SEVERE, errorMessage);
+                    throw new IllegalStateException(errorMessage);
+                }
+
             }
-
-            case PIECE_CAPTURED, PIECE_CAPTURED_AFAR -> board.removePiece(pieceId);
-
-            case PIECE_PROMOTED -> board.promotePiece(pieceId);
-
-            case INVALID_LOCATION, INVALID_PLAYER -> {
-                // Do nothing
-            }
-
-            case WIN_GOLD, WIN_SCARLET, TIE -> {
-                // This case should never occur
-                String errorMessage = "Game result has been determined prematurely";
-                logger.log(Level.SEVERE, errorMessage);
-                throw new IllegalStateException(errorMessage);
-            }
-
+        } catch (IllegalIdException e) {
+            logger.log(SEVERE, "");
         }
     }
 
@@ -292,7 +310,7 @@ public class DragonChessGame {
     private TurnEvent determineTurnEvent(final UUID pieceId,
                                          final BoardPosition position)
             throws IllegalIdException {
-        logger.log(Level.FINE, "Determining turn event for piece with ID " + pieceId
+        logger.log(FINE, "Determining turn event for piece with ID " + pieceId
             + " at board position " + position);
         TurnEvent event;
         // The piece has to currently belong to a player
@@ -331,7 +349,7 @@ public class DragonChessGame {
 
                     default -> {
                         String errorMessage = "Invalid movement option encountered";
-                        logger.log(Level.SEVERE, errorMessage);
+                        logger.log(SEVERE, errorMessage);
                         throw new IllegalStateException(errorMessage);
                     }
 
@@ -352,7 +370,7 @@ public class DragonChessGame {
      * @return The cached movement-options for the given player
      */
     private Map<UUID, Set<MovementOption>> getPlayerOptions(final Player player) {
-        logger.log(Level.FINE, "Request received for options for player " + player);
+        logger.log(FINE, "Request received for options for player " + player);
         if (player == null) {
             throw new IllegalArgumentException("Player can not be null");
         }
@@ -367,7 +385,7 @@ public class DragonChessGame {
 
             default -> {
                 String errorMessage = "Invalid player type encountered";
-                logger.log(Level.SEVERE, errorMessage);
+                logger.log(SEVERE, errorMessage);
                 throw new IllegalStateException(errorMessage);
             }
 
